@@ -3,26 +3,24 @@
 실행:  streamlit run app.py
 데이터: data/*.csv (prep_data.py 로 원본 xlsx 에서 생성)
 
-구성
-- 머리말(공통): 제목·출처 → 과정·지표 정의
-- 탭 1 「과정별 성과 분석」: ③ KPI → ④ 추이 → ⑤ 같은 직종 비교 → ⑥ 변화의 출처(+직종 상세)
-                           → ⑦ 직종 구성 → ⑧ 결론 → ⑨ 한계
-- 탭 2 「부록: 훈련 실시 현황」: 월별 훈련 시작 인원, 계절성, 시도별
+코드 순서
+  0. 설정·상수 → 데이터 불러오기 → 표시용 보조 함수 → 분석 함수
+  1. 데이터 준비      2. 사이드바      3. 머리말(제목·출처·정의, 두 탭 공통)
+  4. 탭 1 「과정별 성과 분석」: ① 요약 카드 → ② 추이(+격차 분해) → ③ 같은 직종 비교 → ④ 변화의 출처
+                              → ⑤ 직종 구성 → ⑥ 결론·한계 요약 → ⑦ (접이식) 직종 상세 → ⑧ 출처·기준·한계
+  5. 탭 2 「부록: 훈련 실시 현황」: 월별 훈련 시작 인원, 계절성, 시도별
 """
 from pathlib import Path
 
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
-from matplotlib import font_manager as fm
-from matplotlib.ticker import FuncFormatter, MaxNLocator, PercentFormatter
 
 ROOT = Path(__file__).resolve().parent
 
-# ------------------------------------------------------------------ 상수
+# ================================================================== 0. 설정·상수
 ACC, NAT = "실업자계좌제", "국가기간전략산업직종훈련"
 COURSES = [ACC, NAT]
 SHORT = {ACC: "계좌제", NAT: "국기훈련"}
@@ -33,24 +31,13 @@ REST_COLOR = "#eeede9"
 SWITCH = 2024                                      # 2025 직종코드가 적용되기 시작한 해
 ALL_JOBS = "전체"
 METRICS = {"취업률": "employment_rate", "수료율": "completion_rate"}
+PLOTLY_FONT = dict(family="Pretendard, 'Noto Sans KR', 'Malgun Gothic', sans-serif", size=13, color=INK)
+PLOTLY_CONFIG = {"displayModeBar": False}                # 툴바 숨김(마우스 툴팁은 유지)
 PEOPLE_NOTE = ("훈련 시작 인원 = 훈련시작일이 해당 월인 과정의 참여자 수. 동일인이 여러 과정을 수강하면 중복 산정(연인원)되어 "
                "실제 사람 수보다 많을 수 있습니다. 해당 월 값은 다음 해 1월까지 재산정됩니다(2026-11-24 조회).")
 
 
-# ------------------------------------------------------------------ 폰트·스타일
-def setup_style():
-    for f in (ROOT / "fonts").glob("*.ttf"):
-        fm.fontManager.addfont(str(f))
-    sns.set_theme(style="whitegrid", font="NanumGothic", rc={
-        "axes.unicode_minus": False,
-        "axes.edgecolor": GRID, "grid.color": GRID, "grid.linewidth": 0.8,
-        "axes.spines.top": False, "axes.spines.right": False,
-        "axes.labelcolor": INK2, "xtick.color": INK2, "ytick.color": INK2,
-        "text.color": INK, "axes.titleweight": "bold", "axes.titlesize": 12,
-        "legend.frameon": False, "figure.dpi": 110,
-    })
-
-
+# ------------------------------------------------------------------ 데이터 불러오기
 @st.cache_data
 def load_data():
     rates = pd.read_csv(ROOT / "data/rates.csv", dtype={"code": "string"})
@@ -59,7 +46,7 @@ def load_data():
     return rates, monthly
 
 
-# ------------------------------------------------------------------ 보조 함수
+# ------------------------------------------------------------------ 표시용 보조 함수 (숫자 형식·축)
 def pct(x, digits=1):
     return "–" if pd.isna(x) else f"{x * 100:.{digits}f}%"
 
@@ -87,23 +74,17 @@ def code_of(year):
     return "2025" if year >= SWITCH else "2018"
 
 
-def set_rate_axis(ax, from_zero, min_span=0.10):
-    """비율 y축: 0% 기준이거나, 최소 10%p 폭을 보장해 작은 변화가 과장되지 않게 한다."""
+def rate_range(values, from_zero, min_span=0.10):
+    """비율 축 범위(0~1 단위): 0% 기준이거나, 최소 10%p 폭을 보장해 작은 변화가 과장되지 않게 한다."""
     if from_zero:
-        ax.set_ylim(0, 1.05)
-    else:
-        lo, hi = ax.get_ylim()
-        mid, span = (lo + hi) / 2, max(hi - lo, min_span) * 1.15
-        ax.set_ylim(max(mid - span / 2, 0), min(mid + span / 2, 1.05))
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=6, steps=[1, 2, 5, 10]))
-    ax.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
+        return 0, 1.05
+    vals = [v for v in np.ravel(values) if pd.notna(v)]
+    lo, hi = min(vals), max(vals)
+    mid, span = (lo + hi) / 2, max(hi - lo, min_span) * 1.25
+    return max(mid - span / 2, 0), min(mid + span / 2, 1.05)
 
 
-def show(fig):
-    st.pyplot(fig, clear_figure=True)
-    plt.close(fig)
-
-
+# ------------------------------------------------------------------ 분석 함수 (직종별 변화 분해)
 def pairs_for(course, metric):
     """같은 직종코드 안에서 비교 가능한 (시작, 끝, 코드) 연도 쌍."""
     jr = rates[(rates.level == "직종") & (rates.course == course)].dropna(subset=[metric])
@@ -136,9 +117,8 @@ def biggest_change_pair(course, metric, y0, y1):
     return max(cands, key=lambda p: abs(totals.loc[p[1], (metric, course)] - totals.loc[p[0], (metric, course)]))
 
 
-# ================================================================== 데이터·사이드바
+# ================================================================== 1. 데이터 준비
 st.set_page_config(page_title="실업자훈련 성과 대시보드", page_icon="📊", layout="wide")
-setup_style()
 rates, monthly = load_data()
 totals = rates[rates.level == "전체"].pivot_table(
     index="year", columns="course", values=["completion_rate", "employment_rate"])
@@ -148,18 +128,19 @@ key_of = pd.concat([rates[["job", "job_key"]], monthly[["job", "job_key"]]]).dro
 name_of = (pd.concat([rates[["code", "job", "job_key"]], monthly[["code", "job", "job_key"]]]).dropna()
            .sort_values("code").groupby("job_key").job.last().map(short_job).to_dict())   # 표시명 = 최신 이름
 
+# ================================================================== 2. 사이드바
 st.sidebar.header("조건 선택")
 y0, y1 = st.sidebar.select_slider("연도 범위", options=list(range(2021, 2026)), value=(2021, 2025))
-st.sidebar.caption(f"KPI·같은 직종 비교의 기준 연도는 범위의 끝인 **{y1}년**입니다.")
+st.sidebar.caption(f"맨 위 요약 카드와 같은 직종 비교의 기준 연도는 범위의 끝인 **{y1}년**입니다.")
 job_keys = sorted(rates[(rates.level == "직종")].dropna(subset=["employment_rate"]).job_key.unique(),
                   key=lambda k: name_of[k])
 sel = st.sidebar.selectbox("직종 (하나 선택)", [ALL_JOBS] + job_keys,
                            format_func=lambda k: k if k == ALL_JOBS else name_of[k])
-st.sidebar.caption("직종을 고르면 KPI에 그 직종 값이 추가되고, ⑤·⑥·⑦ 차트에서 그 직종이 강조됩니다. "
-                   "비율은 여러 직종을 합칠 수 없어(가중치 미공개) 한 번에 하나만 고릅니다.")
+st.sidebar.caption("직종을 고르면 맨 위 요약 카드에 그 직종 값이 추가되고, 같은 직종 비교·변화 출처·직종 구성 차트에서 그 직종이 강조됩니다. "
+                   "수료율·취업률은 직종별 인원이 공개되지 않아 여러 직종을 합쳐 계산할 수 없으므로, 직종은 한 번에 하나만 고릅니다.")
 years = list(range(y0, y1 + 1))
 
-# ================================================================== 머리말 (공통)
+# ================================================================== 3. 머리말 (두 탭 공통)
 st.title("국기훈련은 '덜 수료하지만 더 취업시키는' 과정인가?")
 st.markdown("실업자훈련의 두 과정의 수료율·취업률을 2021~2025년에 걸쳐 비교하고, "
             "국기훈련의 취업 우위가 유지되었는지, 달라졌다면 어디서 달라졌는지 확인합니다.")
@@ -186,11 +167,12 @@ st.caption("두 과정 모두 실제 수강 신청은 국민내일배움카드�
 
 tab_main, tab_app = st.tabs(["📈 과정별 성과 분석", "📎 부록: 훈련 실시 현황"])
 
-# ================================================================== 탭 1
+# ================================================================== 4. 탭 1 — 과정별 성과 분석
 with tab_main:
-    # -------------------------------------------------------------- ③ KPI
+    # -------------------------------------------------------------- ① 요약 카드
     st.subheader(f"{y1}년 한눈에 보기")
-    prev = y1 - 1 if (y1 - 1) in totals.index else None
+    # 증감 기준: 사이드바 범위의 시작 연도(한 해만 고르면 직전 연도) — 추이·결론과 같은 기간을 말하도록
+    prev = y0 if y0 < y1 else (y1 - 1 if (y1 - 1) in totals.index else None)
     kc = st.columns(3)
 
     def job_rate(course, metric, year):
@@ -219,49 +201,70 @@ with tab_main:
             gc = job_rate(NAT, "completion_rate", y1) - job_rate(ACC, "completion_rate", y1)
             ge = job_rate(NAT, "employment_rate", y1) - job_rate(ACC, "employment_rate", y1)
             st.caption(f"**{name_of[sel]}**: 수료율 {pp(gc) or '–'}, 취업률 {pp(ge) or '–'}")
-    st.caption("증감은 전년 대비. 값은 원자료의 과정 '전체' 값(직종 평균이 아님). 직종 값은 해당 연도 직종코드 기준.")
+    st.caption(("증감은 " + (f"{prev}년 대비" if prev else "표시 안 함") + ". ") + "값은 원자료의 과정 '전체' 값(직종 평균이 아님). 직종 값은 해당 연도 직종코드 기준.")
 
-    # -------------------------------------------------------------- ④ 추이
+    # -------------------------------------------------------------- ② 추이
     st.subheader("과정별 수료율·취업률 추이")
     y_from_zero = st.toggle("y축을 0%부터 표시", value=False)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.2), sharey=y_from_zero)
-    for ax, mt, title in zip(axes, ["completion_rate", "employment_rate"], ["수료율", "취업률"]):
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("<b>수료율</b>", "<b>취업률</b>"),
+                        horizontal_spacing=0.08, shared_yaxes=y_from_zero)
+    for ci, mt in enumerate(["completion_rate", "employment_rate"], start=1):
         for c in COURSES:
-            s = totals[mt][c].loc[y0:y1]
-            ax.plot(s.index, s.values, color=COLOR[c], lw=2, marker="o", ms=7, mec="white", mew=1.5, label=SHORT[c])
-            for x in ((s.index[0], s.index[-1]) if len(s) > 1 else (s.index[0],)):
-                ax.annotate(pct(s[x]), (x, s[x]), textcoords="offset points", xytext=(0, 9),
-                            ha="center", fontsize=9, color=INK)
+            s = totals[mt][c].loc[y0:y1] * 100
+            ends = {s.index[0], s.index[-1]}
+            fig.add_scatter(
+                x=s.index, y=s.values, mode="lines+markers+text", name=SHORT[c], legendgroup=c, showlegend=ci == 1,
+                line=dict(color=COLOR[c], width=2.5), marker=dict(size=9, line=dict(color="white", width=1.5)),
+                text=[f"{y_:.1f}%" if x_ in ends else "" for x_, y_ in s.items()], textposition="top center",
+                fill="tonexty" if c == NAT and len(years) > 1 else None, fillcolor="rgba(138,137,133,0.12)",
+                hovertemplate=f"{SHORT[c]} %{{x}}년: %{{y:.1f}}%<extra></extra>", row=1, col=ci)
         if len(years) > 1:
-            a, n = totals[mt][ACC].loc[y0:y1], totals[mt][NAT].loc[y0:y1]
-            ax.fill_between(a.index, a.values, n.values, color=GREY, alpha=0.12, lw=0)
-            for x in (y0, y1):
-                ax.annotate(f"격차 {(n[x] - a[x]) * 100:+.1f}%p", (x, (n[x] + a[x]) / 2),
-                            ha="left" if x == y0 else "right", va="center", fontsize=9, color=INK2,
-                            xytext=(6 if x == y0 else -6, 0), textcoords="offset points")
-        ax.set_title(title, loc="left")
-        ax.set_xticks(years)
-        set_rate_axis(ax, y_from_zero)
-        ax.set_xlim(y0 - 0.4, y1 + 0.4)
-    axes[0].legend(loc="lower left", ncol=2)
-    fig.tight_layout()
-    show(fig)
+            a, n = totals[mt][ACC].loc[y0:y1] * 100, totals[mt][NAT].loc[y0:y1] * 100
+            for x_, sh in ((y0, 40), (y1, -40)):
+                fig.add_annotation(x=x_, y=(a[x_] + n[x_]) / 2, text=f"격차 {n[x_] - a[x_]:+.1f}%p", showarrow=False,
+                                   xshift=sh, font=dict(size=11, color=INK2), row=1, col=ci)
+        lo, hi = rate_range(totals[mt].loc[y0:y1].values.ravel(), y_from_zero)
+        fig.update_yaxes(range=[lo * 100, hi * 100], ticksuffix="%", row=1, col=ci)
+    fig.update_xaxes(tickmode="array", tickvals=years, range=[y0 - 0.4, y1 + 0.4])
+    fig.update_layout(height=420, font=PLOTLY_FONT, template="plotly_white", hovermode="x unified",
+                      legend=dict(orientation="h", y=1.2, yanchor="bottom", x=0), margin=dict(l=10, r=10, t=80, b=30))
+    st.plotly_chart(fig, config=PLOTLY_CONFIG)
     st.caption("과정 '전체' 값은 직종분류 개편과 무관하게 5년이 이어진 계열입니다. 음영 = 두 과정의 차이."
                + ("" if y_from_zero else " y축이 0에서 시작하지 않아 차이가 확대되어 보입니다(위 토글로 0% 기준 전환)."))
+    # 취업률 격차 분해: 격차 변화 = 국기훈련 변화 - 계좌제 변화 (기간 전체 + 해마다)
+    emp = totals["employment_rate"] * 100
+    stages = []                                  # 해마다 격차 변화와 그 주된 원인 (결론에서도 사용)
+    for y in range(y0 + 1, y1 + 1):
+        sN, sA = emp[NAT][y] - emp[NAT][y - 1], emp[ACC][y] - emp[ACC][y - 1]
+        who = (f"국기훈련 {'상승' if sN > 0 else '하락'} {sN:+.1f}" if abs(sN) >= abs(sA)
+               else f"계좌제 {'상승' if sA > 0 else '하락'} {sA:+.1f}")
+        stages.append((y, sN - sA, who))
+    nat_main = True
     if len(years) > 1:
-        n0, n1 = totals.loc[y0, ("employment_rate", NAT)], totals.loc[y1, ("employment_rate", NAT)]
-        a0, a1 = totals.loc[y0, ("employment_rate", ACC)], totals.loc[y1, ("employment_rate", ACC)]
-        st.info(f"**{y0}→{y1}년 취업률:** 국기훈련 {pct(n0)} → {pct(n1)} ({(n1 - n0) * 100:+.1f}%p), "
-                f"계좌제 {pct(a0)} → {pct(a1)} ({(a1 - a0) * 100:+.1f}%p). "
-                f"격차는 {(n0 - a0) * 100:.1f}%p → {(n1 - a1) * 100:.1f}%p.")
+        n0, n1, a0, a1 = emp[NAT][y0], emp[NAT][y1], emp[ACC][y0], emp[ACC][y1]
+        dN, dA = n1 - n0, a1 - a0
+        dG = dN - dA
+        nat_main = abs(dN) >= abs(dA)
+        stage_txt = ", ".join(f"{y}년 {g:+.1f}%p({w})" for y, g, w in stages)
+        follow = ("기간 전체로는 국기훈련의 변화가 더 커서, 아래에서 국기훈련 취업률을 직종별로 쪼개 봅니다. "
+                  "(계좌제는 직종이 30개 안팎으로 흩어져 있어 같은 방식으로 쪼개지 않았습니다.)" if nat_main else
+                  "이 기간 격차 변화는 **주로 계좌제의 변화** 때문입니다. 아래 구역은 국기훈련 쪽 변화만 직종별로 본 것이라, "
+                  "이 기간 격차 변화의 주된 원인을 설명하지는 않습니다.")
+        st.info(f"**{y0}→{y1}년 취업률 격차 {n0 - a0:.1f}%p → {n1 - a1:.1f}%p ({dG:+.1f}%p).** "
+                f"격차 변화 {dG:+.1f}%p = 국기훈련 변화 {dN:+.1f}%p ({n0:.1f}% → {n1:.1f}%) "
+                f"- 계좌제 변화 {dA:+.1f}%p ({a0:.1f}% → {a1:.1f}%). "
+                f"해마다 보면 {stage_txt}. {follow}")
 
-    # -------------------------------------------------------------- ⑤ 같은 직종 비교
-    st.subheader(f"같은 직종이어도 국기훈련이 더 취업시키나 — {y1}년 직종별 비교")
-    st.markdown("국기훈련이 원래 취업률 높은 직종에 몰려 있어서 생긴 차이인지, **같은 직종끼리** 비교해 확인합니다.")
+    # -------------------------------------------------------------- ③ 같은 직종 비교
+    title3, lead3 = st.empty(), st.empty()      # 제목·설명은 지표 선택 뒤에 채운다
     s1, s2 = st.columns([1, 2])
     with s1:
-        metric_label = st.radio("비교 지표 (이 구역과 아래 구역에 적용)", list(METRICS), horizontal=True)
+        metric_label = st.radio("비교 지표", list(METRICS), horizontal=True)
     metric = METRICS[metric_label]
+    title3.subheader(f"같은 직종이어도 국기훈련이 더 취업시키나 — {y1}년 직종별 비교" if metric_label == "취업률" else
+                     f"같은 직종이어도 국기훈련의 수료율이 더 낮은가 — {y1}년 직종별 비교")
+    lead3.markdown(f"국기훈련이 원래 {metric_label}이 높거나 낮은 직종에 몰려 있어서 생긴 차이인지, "
+                   "**같은 직종끼리** 비교해 확인합니다.")
     with s2:
         min_n = st.slider("두 과정 모두 이 인원 이상인 직종만 (해당 연도 전국 훈련 시작 인원)", 0, 1000, 50, step=10)
     code = code_of(y1)
@@ -274,32 +277,32 @@ with tab_main:
     if d.empty:
         st.warning("조건에 맞는 직종이 없습니다. 최소 인원을 낮춰 보세요.")
     else:
-        fig, ax = plt.subplots(figsize=(12, 0.42 * len(d) + 1.3))
-        yy = np.arange(len(d))
         hl = [key_of.get(j) == sel for j in d.index]
-        for i, h in enumerate(hl):
-            if h:
-                ax.axhspan(i - 0.45, i + 0.45, color="#fff1e0", zorder=0)
-        ax.hlines(yy, d[ACC], d[NAT], color=GREY, lw=2, alpha=0.5, zorder=1)
+        ylab = [f"<b>{short_job(j)}</b>" if h else short_job(j) for j, h in zip(d.index, hl)]
+        fig = go.Figure()
+        # 두 점을 잇는 회색 선 (None 으로 끊어 한 번에)
+        fig.add_scatter(x=[x_ for a_, n_ in zip(d[ACC], d[NAT]) for x_ in (a_ * 100, n_ * 100, None)],
+                        y=[y_ for lab in ylab for y_ in (lab, lab, None)], mode="lines",
+                        line=dict(color=GREY, width=2), opacity=0.5, hoverinfo="skip", showlegend=False)
         for c in COURSES:
-            ax.scatter(d[c], yy, s=80, color=COLOR[c], edgecolor="white", linewidth=1.5, zorder=3, label=SHORT[c])
-        for i, v in enumerate(d["diff"]):
-            ax.annotate(f"{v * 100:+.1f}%p", (1.005, i), xycoords=("axes fraction", "data"), va="center",
-                        fontsize=9, color=INK if v >= 0 else COLOR[NAT], fontweight="bold" if v < 0 else "normal")
-        ax.set_yticks(yy, [short_job(j) for j in d.index])
-        for lab, h in zip(ax.get_yticklabels(), hl):
-            if h:
-                lab.set_fontweight("bold")
-                lab.set_color(INK)
-        ax.xaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
-        ax.set_xlabel(metric_label)
-        ax.grid(axis="y", visible=False)
-        ax.set_ylim(-0.7, len(d) - 0.3)
-        ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.0 + 0.9 / (0.42 * len(d) + 1.3)), ncol=2)
-        ax.annotate("국기 - 계좌제", (1.005, 1), xycoords="axes fraction", xytext=(0, 6),
-                    textcoords="offset points", fontsize=8.5, color=INK2)
-        fig.tight_layout()
-        show(fig)
+            fig.add_scatter(x=d[c] * 100, y=ylab, mode="markers", name=SHORT[c],
+                            marker=dict(size=12, color=COLOR[c], line=dict(color="white", width=1.5)),
+                            customdata=[[f"{x_:,}"] for x_ in d[f"n_{c}"].astype(int)],
+                            hovertemplate=f"<b>%{{y}}</b><br>{SHORT[c]} {metric_label} %{{x:.1f}}%"
+                                          "<br>훈련 시작 인원 %{customdata[0]}명<extra></extra>")
+        xmax = max(d[ACC].max(), d[NAT].max()) * 100
+        fig.add_scatter(x=[xmax + 7] * len(d), y=ylab, mode="text", showlegend=False, hoverinfo="skip", cliponaxis=False,
+                        text=[f"<b>{v_ * 100:+.1f}%p</b>" if v_ < 0 else f"{v_ * 100:+.1f}%p" for v_ in d["diff"]],
+                        textfont=dict(color=[COLOR[NAT] if v_ < 0 else INK for v_ in d["diff"]], size=12))
+        fig.add_annotation(x=xmax + 7, y=1, yref="paper", yanchor="bottom", text="국기 - 계좌제",
+                           showarrow=False, font=dict(size=11, color=INK2))
+        fig.update_layout(height=32 * len(d) + 120, font=PLOTLY_FONT, template="plotly_white",
+                          legend=dict(orientation="h", y=1.04, yanchor="bottom", x=0),
+                          margin=dict(l=10, r=10, t=50, b=40),
+                          xaxis=dict(title=metric_label, ticksuffix="%",
+                                     range=[min(d[ACC].min(), d[NAT].min()) * 100 - 4, xmax + 14]),
+                          yaxis=dict(title=None))
+        st.plotly_chart(fig, config=PLOTLY_CONFIG)
         win, win_all = int((d["diff"] > 0).sum()), int((full["diff"] > 0).sum())
         st.markdown(f"**{len(d)}개 직종 중 {win}개**에서 국기훈련 {metric_label}이 더 높습니다 "
                     f"(차이 중앙값 {d['diff'].median() * 100:+.1f}%p).")
@@ -319,130 +322,141 @@ with tab_main:
                 "계좌제 인원": d[f"n_{ACC}"].astype(int), "국기 인원": d[f"n_{NAT}"].astype(int)}).iloc[::-1],
                 hide_index=True)
 
-    # -------------------------------------------------------------- ⑥ 변화의 출처
-    st.subheader(f"{metric_label} 변화는 어느 직종에서 왔나")
-    st.markdown("직종코드가 같은 두 연도 사이에서만 비교합니다(2018 코드끼리 또는 2025 코드끼리).")
-    c1, c2 = st.columns(2)
-    with c1:
-        dc = st.selectbox("과정 (이 구역과 아래 직종 구성에 적용)", COURSES, index=1, format_func=SHORT.get)
-    pairs = pairs_for(dc, metric)
-    in_range = [p for p in pairs if y0 <= p[0] and p[1] <= y1]
-    opts = in_range or pairs
-    best = biggest_change_pair(dc, metric, y0, y1)
-    with c2:
-        k = st.selectbox("비교 구간", range(len(opts)), index=opts.index(best) if best in opts else 0,
-                         format_func=lambda i: f"{opts[i][0]} → {opts[i][1]}  ({opts[i][2]} 코드)",
-                         help="기본값은 연도 범위 안에서 전체 값이 가장 크게 변한 연속 연도 구간")
-    if not in_range:
-        st.caption("현재 연도 범위 안에는 같은 직종코드의 연도가 2개 이상 없어 전체 기간의 구간을 보여 줍니다.")
-    pa, pb, pcode = opts[k]
-    v, official = decompose(dc, metric, pa, pb, pcode)
+    # -------------------------------------------------------------- ④ 변화의 출처
+    # 격차 변화의 주된 원인인 '국기훈련 취업률'에 고정 (위 정보 상자의 격차 분해가 이유)
+    dc, metric, metric_label = NAT, "employment_rate", "취업률"
+    st.subheader("국기훈련 취업률은 왜 변했나 — 직종별로 쪼개 보기")
+    # 같은 직종코드 안의 '연속 연도' 구간만 선택지로 (연도 범위 안)
+    consec = [p for p in pairs_for(dc, metric) if p[1] - p[0] == 1 and y0 <= p[0] and p[1] <= y1]
+    skipped = [f"{y}→{y + 1}" for y in range(y0, y1)
+               if not any(p[0] == y for p in consec)]
+    top = None
+    if not consec:
+        st.info("현재 연도 범위 안에는 같은 직종코드로 비교할 수 있는 연속 연도가 없습니다. 사이드바 연도 범위를 넓혀 보세요.")
+    else:
+        best = biggest_change_pair(dc, metric, y0, y1)
+        labels = {f"{a}→{b}": (a, b, cd) for a, b, cd in consec}
+        pick = st.segmented_control("비교 구간", list(labels), default=f"{best[0]}→{best[1]}",
+                                    help="기본값은 전체 값이 가장 크게 변한 구간") or f"{best[0]}→{best[1]}"
+        pa, pb, pcode = labels[pick]
+        if skipped:
+            st.caption(f"{', '.join(skipped)}: 직종코드(KECO)가 바뀌어 직종 단위로 비교할 수 없어 선택지에서 뺐습니다.")
+        v, official = decompose(dc, metric, pa, pb, pcode)
+        v = v.sort_values("n", ascending=False)
+        down = int((v.delta < 0).sum())
+        top = v.contrib.abs().idxmax()
+        same_sign = np.sign(v.contrib[top]) == np.sign(official) and abs(official) >= 0.01
+        tail = (f"전체 변화의 **약 {v.contrib[top] / official * 100:.0f}%가 {short_job(top)}**에서 나왔습니다"
+                if same_sign else f"가장 큰 기여는 **{short_job(top)}**({v.contrib[top] * 100:+.2f}%p)입니다")
+        tail += f" — 이 직종은 {pa}년 국기훈련 시작 인원의 **{v.w[top] * 100:.0f}%를** 차지합니다."
+        # 이 한 구간이 연도 범위 전체 변화에서 차지하는 몫 (같은 방향일 때만)
+        totN = (totals.loc[y1, (metric, dc)] - totals.loc[y0, (metric, dc)]) * 100
+        link = (f" ({y0}→{y1}년 국기훈련 취업률 전체 변화 {totN:+.1f}%p 중 약 {official * 100 / totN * 100:.0f}%가 이 구간)"
+                if (pa, pb) != (y0, y1) and abs(totN) >= 1 and 0 < official * 100 / totN <= 1 else "")
+        st.markdown(f"**{pa}→{pb}년 {SHORT[dc]} {metric_label} {official * 100:+.1f}%p{link}.** "
+                    f"{len(v)}개 직종 중 {down}개에서 떨어졌고, {tail}")
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 0.36 * len(v) + 1.6), sharey=True)
-    yy = np.arange(len(v))
-    hl = [key_of.get(j) == sel for j in v.index]
-    for ax, col, title in zip(axes, ["delta", "contrib"],
-                              [f"직종별 {metric_label} 변화 (%p)", "전체 변화에 대한 기여 (%p, 근사)"]):
-        vals = v[col] * 100
-        ax.barh(yy, vals, color=[COLOR[dc] if (h or sel == ALL_JOBS) else "#f4b79c" for h in hl], height=0.65)
-        ax.axvline(0, color=INK2, lw=0.8)
-        lim = max(abs(vals).max(), 0.5) * 1.35
-        ax.set_xlim(-lim, lim)
-        for i, x in enumerate(vals):
-            ax.annotate(fmt_pp(x, contrib=(col == "contrib")), (x, i), xytext=(4 if x >= 0 else -4, 0),
-                        textcoords="offset points", ha="left" if x >= 0 else "right", va="center",
-                        fontsize=8.5, color=INK)
-        ax.set_title(title, loc="left")
-        ax.grid(axis="y", visible=False)
-    axes[0].set_yticks(yy, [f"{short_job(j)}  ({int(n):,}명)" for j, n in zip(v.index, v.n)])
-    for lab, h in zip(axes[0].get_yticklabels(), hl):
-        if h:
-            lab.set_fontweight("bold")
-            lab.set_color(INK)
-    axes[0].invert_yaxis()
-    fig.tight_layout()
-    show(fig)
-    top = v.contrib.abs().idxmax()
-    st.markdown(f"**{SHORT[dc]} 전체 {metric_label}: {pct(totals.loc[pa, (metric, dc)])} → "
-                f"{pct(totals.loc[pb, (metric, dc)])} ({official * 100:+.1f}%p).** 직종별 기여를 더하면 "
-                f"{v.contrib.sum() * 100:+.1f}%p이고, 그중 **{short_job(top)}**이 {v.contrib[top] * 100:+.1f}%p를 차지합니다.")
-    st.caption(f"기여 = ({pa}년 훈련 시작 인원 비중) × (직종의 {metric_label} 변화). 실제 가중치(수료인원 등)가 공개되지 않아 "
-               "시작 인원 비중으로 근사했으므로 기여의 합은 공식 전체 변화와 정확히 같지 않습니다(직종 구성 변화·가중치 근사). "
-               "괄호 안은 시작 연도의 전국 훈련 시작 인원(연인원).")
+        hl = [key_of.get(j) == sel for j in v.index]
+        names = [(f"<b>{short_job(j)}</b>" if h else short_job(j)) + (f" ({w * 100:.0f}%)" if w >= 0.005 else " (<1%)")
+                 for j, h, w in zip(v.index, hl, v.w)]
+        wtxt = [f"{w * 100:.1f}%" if w >= 0.0005 else "<0.1%" for w in v.w]
+        bar_h = 34 * len(v) + 110
+        # (1) 묶음 막대: 직종별 이전·이후 비율 (인원 많은 순, 위에서부터)
+        fig = go.Figure()
+        for yr, colr in ((pa, "#c9c7c0"), (pb, COLOR[dc])):
+            fig.add_bar(
+                y=names, x=v[yr] * 100, orientation="h", name=f"{yr}년", marker_color=colr,
+                text=[fmt_pp(d_) for d_ in v.delta * 100] if yr == pb else None,
+                textposition="outside", textfont=dict(size=11),
+                # 툴팁 숫자는 미리 문자열로 (부호 있는 형식은 plotly 서식이 적용되지 않음)
+                customdata=[[w_, f"{a_:.2f}", f"{b_:.2f}", f"{d_:+.2f}"]
+                            for w_, a_, b_, d_ in zip(wtxt, v[pa] * 100, v[pb] * 100, v.delta * 100)],
+                hovertemplate=(f"<b>%{{y}}</b><br>{pa}년 인원 비중 %{{customdata[0]}}<br>"
+                               f"{pa}년 {metric_label} %{{customdata[1]}}%<br>"
+                               f"{pb}년 {metric_label} %{{customdata[2]}}%<br>"
+                               "변화 %{customdata[3]}%p<extra></extra>"))
+        fig.update_layout(
+            barmode="group", bargap=0.25, height=bar_h, font=PLOTLY_FONT, template="plotly_white",
+            title=dict(text=f"직종별 {metric_label} (괄호: {pa}년 인원 비중, 막대 끝: 변화 %p)", x=0, font=dict(size=14)),
+            legend=dict(orientation="h", y=1.0, yanchor="bottom", x=1, xanchor="right", title=None),
+            margin=dict(l=10, r=10, t=60, b=40),
+            xaxis=dict(title=metric_label, ticksuffix="%", range=[0, max(v[pa].max(), v[pb].max()) * 100 * 1.18]),
+            yaxis=dict(autorange="reversed", title=None))
+        st.plotly_chart(fig, config=PLOTLY_CONFIG)
+        # (2) 정렬된 기여 막대: 전체 변화에 얼마나 영향을 줬나 (영향 큰 순)
+        cv = (v.contrib * 100).sort_values(key=lambda s: -s.abs())
+        share = cv / (official * 100) * 100 if abs(official) >= 0.0001 else cv * np.nan
+        fig = go.Figure(go.Bar(
+            y=[f"<b>{short_job(j)}</b>" if key_of.get(j) == sel else short_job(j) for j in cv.index],
+            x=cv.values, orientation="h",
+            marker_color=[COLOR[dc] if j == top else "#f4b79c" for j in cv.index],
+            text=[fmt_pp(x, contrib=True) for x in cv.values], textposition="outside", textfont=dict(size=11),
+            cliponaxis=False,
+            customdata=[[f"{c_:+.3f}", f"{w_:.1f}", f"{d_:+.2f}", "–" if pd.isna(s_) else f"{s_:.0f}"]
+                        for c_, w_, d_, s_ in zip(cv.values, v.loc[cv.index, "w"] * 100,
+                                                  v.loc[cv.index, "delta"] * 100, share)],
+            hovertemplate=("<b>%{y}</b><br>기여 %{customdata[0]}%p<br>= 인원 비중 %{customdata[1]}% "
+                           f"× {metric_label} 변화 %{{customdata[2]}}%p<br>"
+                           "전체 변화 중 %{customdata[3]}%<extra></extra>")))
+        lo, hi = min(cv.min(), 0), max(cv.max(), 0)
+        pad = (hi - lo or 0.3) * 0.4                # 막대 끝 숫자가 들어갈 여백
+        fig.update_layout(
+            height=26 * len(v) + 110, font=PLOTLY_FONT, template="plotly_white", showlegend=False,
+            title=dict(text="전체 변화에 대한 기여 (%p)", x=0, font=dict(size=14)),
+            margin=dict(l=10, r=10, t=60, b=40),
+            xaxis=dict(title="기여 (%p)", range=[lo - pad, hi + pad], zeroline=True, zerolinecolor=INK2),
+            yaxis=dict(autorange="reversed", title=None, tickfont=dict(size=11)))
+        st.plotly_chart(fig, config=PLOTLY_CONFIG)
+        resid = official - v.contrib.sum()
+        st.caption(f"막대에 마우스를 올리면 정확한 값이 나옵니다. 위: 회색 = {pa}년, 색 = {pb}년. 아래: 기여 = ({pa}년 훈련 시작 인원 비중) × ({metric_label} 변화), "
+                   f"영향이 큰 순. 직종별 기여의 합은 {v.contrib.sum() * 100:+.2f}%p로 실제 전체 변화 {official * 100:+.2f}%p와 "
+                   f"{resid * 100:+.2f}%p 차이가 납니다. 실제 가중치(수료인원 등)가 공개되지 않아 시작 인원 비중으로 근사했고, "
+                   "직종 구성 변화도 이 차이에 포함됩니다.")
+        with st.expander("표로 보기 (정확한 값)"):
+            st.dataframe(pd.DataFrame({
+                "직종": [short_job(j) for j in v.index],
+                f"{pa}년 인원 비중": (v.w * 100).round(1).astype(str) + "%",
+                f"{pa}년 {metric_label}": v[pa].map(lambda x: pct(x, 2)),
+                f"{pb}년 {metric_label}": v[pb].map(lambda x: pct(x, 2)),
+                "변화(%p)": (v.delta * 100).round(2),
+                "기여(%p)": (v.contrib * 100).round(3)}), hide_index=True)
 
-    # 직종 상세 추이
-    dj = sel if sel != ALL_JOBS else key_of.get(top)
-    st.markdown(f"##### 직종 상세: {name_of[dj]}의 5년 추이"
-                + ("" if sel != ALL_JOBS else "  \n<small>사이드바에서 직종을 고르면 바뀝니다. 기본값은 위에서 기여가 가장 큰 직종.</small>"),
-                unsafe_allow_html=True)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 3.8), sharey=y_from_zero)
-    jd = rates[(rates.job_key == dj) & rates.year.between(y0, y1)]
-    for ax, mt, title in zip(axes, ["completion_rate", "employment_rate"], ["수료율", "취업률"]):
-        for c in COURSES:
-            for cd, ls, face in (("2018", "--", "white"), ("2025", "-", None)):
-                s = jd[(jd.course == c) & (jd.code == cd)].set_index("year")[mt].dropna().sort_index()
-                if s.empty:
-                    continue
-                ax.plot(s.index, s.values, ls=ls, lw=2, color=COLOR[c], marker="o", ms=7,
-                        mfc=face or COLOR[c], mec=COLOR[c] if face else "white", mew=1.5, label=f"{SHORT[c]} · {cd} 코드")
-        if y0 < SWITCH <= y1:
-            ax.axvline(SWITCH - 0.5, color=GREY, lw=1, ls=":")
-            ax.annotate("KECO 개편", (SWITCH - 0.5, 0), xycoords=("data", "axes fraction"), xytext=(-4, 4),
-                        ha="right", textcoords="offset points", fontsize=8, color=INK2)
-        ax.set_title(title, loc="left")
-        ax.set_xticks(years)
-        ax.set_xlim(y0 - 0.4, y1 + 0.4)
-        set_rate_axis(ax, y_from_zero)
-    h, l = axes[1].get_legend_handles_labels()
-    if h:
-        fig.legend(h, l, loc="lower center", ncol=4, bbox_to_anchor=(0.5, -0.06))
-    fig.tight_layout()
-    show(fig)
-    st.caption("점선·속 빈 점 = 2018 직종코드, 실선·속 찬 점 = 2025 직종코드. 2025년 KECO 개편으로 직종의 세부 구성이 달라져 "
-               "두 코드를 선으로 잇지 않았습니다. 2024년 취업률은 원자료에 두 코드 값이 함께 있고(수료율은 2025 코드만) "
-               "같은 직종명도 값이 다릅니다. 표시되지 않는 점은 원자료 값이 없는 경우입니다.")
-
-    # -------------------------------------------------------------- ⑦ 직종 구성
-    st.subheader(f"왜 그 직종의 영향이 큰가 — {SHORT[dc]} 훈련 시작 인원의 직종 구성")
+    # -------------------------------------------------------------- ⑤ 직종 구성
     comp = (monthly[(monthly.course == dc) & monthly.year.between(y0, y1)]
             .groupby(["year", "job_key"]).trainees.sum().unstack(fill_value=0))
     share = comp.div(comp.sum(axis=1), axis=0)
     order = comp.sum().sort_values(ascending=False).index
     focus = sel if (sel != ALL_JOBS and sel in comp.columns) else order[0]
+    st.subheader("그 쏠림은 계속되나 — 국기훈련 훈련 시작 인원의 직종 구성" if focus == order[0] else
+                 f"{name_of[focus]}의 비중은 어떻게 변했나 — 국기훈련 훈련 시작 인원의 직종 구성")
     others = [j for j in order if j != focus][:4]
     cats = [focus] + others
     plot = share[cats].copy()
     plot["기타"] = 1 - plot.sum(axis=1)
     colors = [COLOR[dc]] + OTHER_GREYS[:len(others)] + [REST_COLOR]
-    ypos = {y: i + (0.6 if y >= SWITCH else 0) for i, y in enumerate(plot.index)}
-    fig, ax = plt.subplots(figsize=(12, 0.62 * len(plot) + 1.6))
-    left = np.zeros(len(plot))
-    yv = [ypos[y] for y in plot.index]
+    sep = "── KECO 개편 ──"                       # 2023과 2024 사이에 빈 행을 넣어 개편 지점을 표시
+    rows = [str(y) for y in plot.index if y < SWITCH] + \
+           ([sep] if (y0 < SWITCH <= y1) else []) + [str(y) for y in plot.index if y >= SWITCH]
+    fig = go.Figure()
     for col, colr in zip(plot.columns, colors):
-        vals = plot[col].values
-        ax.barh(yv, vals, left=left, color=colr, height=0.72, edgecolor="white", linewidth=2,
-                label=col if col == "기타" else name_of[col])
-        for yy_, l_, v_ in zip(yv, left, vals):
-            if v_ >= 0.06:
-                dark = colr in (COLOR[dc], OTHER_GREYS[0], OTHER_GREYS[1])
-                ax.annotate(f"{v_ * 100:.0f}%", (l_ + v_ / 2, yy_), ha="center", va="center", fontsize=9,
-                            color="white" if dark else INK, fontweight="bold" if col == focus else "normal")
-        left += vals
-    ax.set_yticks(yv, [str(y) for y in plot.index])
-    ax.invert_yaxis()
-    ax.set_xlim(0, 1)
-    ax.xaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
-    ax.grid(False)
-    ax.spines[["left", "bottom"]].set_visible(False)
-    if y0 < SWITCH <= y1:
-        ysw = (ypos[SWITCH - 1] + ypos[SWITCH]) / 2
-        ax.axhline(ysw, color=INK2, lw=1, ls=":")
-        ax.annotate("KECO 개편: 위 2018 직종코드 / 아래 2025 직종코드", (1, ysw), xycoords=("axes fraction", "data"),
-                    xytext=(0, 3), textcoords="offset points", ha="right", va="bottom", fontsize=8.5, color=INK2)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08 * 6 / (0.62 * len(plot) + 1.6) - 0.02),
-              ncol=3, fontsize=9)
-    fig.tight_layout()
-    show(fig)
+        label = col if col == "기타" else name_of[col]
+        vals = plot[col] * 100
+        cnt = comp[col] if col != "기타" else comp.sum(axis=1) - comp[cats].sum(axis=1)
+        dark = colr in (COLOR[dc], OTHER_GREYS[0], OTHER_GREYS[1])
+        fig.add_bar(y=[str(y) for y in plot.index], x=vals, orientation="h", name=label, marker_color=colr,
+                    marker_line=dict(color="white", width=2),
+                    text=[f"<b>{x_:.0f}%</b>" if col == focus else f"{x_:.0f}%" if x_ >= 6 else "" for x_ in vals],
+                    textposition="inside", insidetextanchor="middle", textangle=0,
+                    textfont=dict(color="white" if dark else INK, size=12),
+                    customdata=[[f"{n_:,.0f}"] for n_ in cnt.reindex(plot.index)],
+                    hovertemplate=f"<b>{label}</b><br>%{{y}}년: %{{x:.1f}}% (%{{customdata[0]}}명)<extra></extra>")
+    fig.update_layout(barmode="stack", height=46 * len(rows) + 140, font=PLOTLY_FONT, template="plotly_white",
+                      uniformtext=dict(minsize=10, mode="hide"),      # 칸에 안 들어가는 숫자는 숨김(툴팁으로 확인)
+                      legend=dict(orientation="h", y=-0.12, x=0.5, xanchor="center", traceorder="normal"),
+                      margin=dict(l=10, r=10, t=20, b=40),
+                      xaxis=dict(range=[0, 100], ticksuffix="%", title=None),
+                      yaxis=dict(categoryorder="array", categoryarray=rows, autorange="reversed", title=None))
+    st.plotly_chart(fig, config=PLOTLY_CONFIG)
     f0, f1 = share.loc[y0, focus], share.loc[y1, focus]
     st.markdown(f"{SHORT[dc]} 훈련 시작 인원 중 **{name_of[focus]}** 비중: "
                 + (f"{y0}년 {pct(f0, 0)} → {y1}년 {pct(f1, 0)}." if y0 != y1 else f"{y1}년 {pct(f1, 0)}."))
@@ -450,7 +464,7 @@ with tab_main:
                "같은 색으로 두었지만 개편 앞뒤는 코드 체계가 달라 구성이 정확히 같지 않습니다. "
                "비율(훈련이 끝난 해 기준)과 달리 인원은 훈련을 시작한 해 기준입니다.")
 
-    # -------------------------------------------------------------- ⑧ 결론
+    # -------------------------------------------------------------- ⑥ 결론 + 한계 요약
     st.subheader("결론")
     gN = totals["employment_rate"][NAT] - totals["employment_rate"][ACC]
     gC = totals["completion_rate"][NAT] - totals["completion_rate"][ACC]
@@ -462,18 +476,79 @@ with tab_main:
              f"{'낮고' if gC[y1] < 0 else '높고'}, 취업률은 {abs(gN[y1]) * 100:.1f}%p {'높다' if gN[y1] > 0 else '낮다'}.",
              f"**직종 구성 탓만은 아니다:** 같은 직종끼리 비교해도 {len(emp_full)}개 중 {emp_win}개 직종에서 국기훈련 취업률이 더 높다({y1}년)."]
     if len(years) > 1:
+        big_stages = [f"{y}년 {w}%p" for y, g, w in stages if abs(g) >= 1]   # 격차가 1%p 이상 움직인 해만
         lines.append(f"**그러나 우위는 {'줄었다' if gN[y1] < gN[y0] else '유지·확대되었다'}:** 취업률 격차 "
-                     f"{gN[y0] * 100:.1f}%p({y0}) → {gN[y1] * 100:.1f}%p({y1}).")
-    if bp:
+                     f"{gN[y0] * 100:.1f}%p({y0}) → {gN[y1] * 100:.1f}%p({y1})."
+                     + (f" 격차를 움직인 것은 {', '.join(big_stages)}." if big_stages else ""))
+    if len(years) > 1 and not nat_main:          # 이 기간 격차 변화의 주된 원인이 계좌제인 경우
+        lines.append(f"**변화의 출처:** 이 기간 격차 변화는 주로 계좌제 취업률 변화({dA:+.1f}%p) 때문이다. "
+                     f"국기훈련 취업률은 {dN:+.1f}%p 변했다.")
+    elif bp:
         vb, ob = decompose(NAT, "employment_rate", *bp)
         tb = vb.contrib.abs().idxmax()
         lines.append(f"**변화의 출처:** 국기훈련 취업률이 가장 크게 변한 {bp[0]}→{bp[1]}년({ob * 100:+.1f}%p)의 기여 중 "
                      f"{short_job(tb)}이 {vb.contrib[tb] * 100:+.1f}%p로 가장 크다. 이 직종은 국기훈련 시작 인원의 "
                      f"{pct(vb.w[tb], 0)}({bp[0]}년)를 차지한다.")
+    # 제목 질문에 대한 한 줄 답 (데이터로 판정)
+    yes = gC[y1] < 0 and gN[y1] > 0
+    answer = (f"**답: {'그렇다' if yes else '이 기간에는 그렇지 않다'}.** {y1}년 국기훈련은 계좌제보다 "
+              f"수료율 {gC[y1] * 100:+.1f}%p, 취업률 {gN[y1] * 100:+.1f}%p.")
+    if len(years) > 1:
+        answer += (f" 다만 취업 우위는 {y0}년 {gN[y0] * 100:.1f}%p에서 {y1}년 {gN[y1] * 100:.1f}%p로 "
+                   f"{'줄었다' if gN[y1] < gN[y0] else '늘었다'}.")
+    st.markdown(answer)
     st.success("\n".join(f"{i + 1}. {t}" for i, t in enumerate(lines)))
     st.caption("결론 문장은 사이드바 연도 범위에 따라 데이터에서 다시 계산됩니다(같은 직종 비교는 인원 필터 없이 계산).")
+    st.markdown("**한계 요약**\n"
+                "- 취업률 격차는 과정의 '효과'가 아니다. 같은 직종 안에서도 과정 내용·훈련생 특성이 다를 수 있다.\n"
+                "- 2025년 직종분류(KECO) 개편으로 직종 단위 비교는 같은 코드 체계 안에서만 했다.\n"
+                "- 직종별 기여는 공개되지 않은 실제 가중치 대신 훈련 시작 인원 비중으로 근사했다.\n\n"
+                "자세한 출처·기준·한계는 맨 아래 상자에 있습니다.")
 
-    # -------------------------------------------------------------- ⑨ 한계
+    # -------------------------------------------------------------- ⑦ 직종 하나 자세히 보기 (접이식)
+    with st.expander("직종 하나 자세히 보기 — 5년 추이와 직종코드 개편"):
+        dj = sel if sel != ALL_JOBS else (key_of.get(top) if top else "정보통신연구개발직및공학기술직")
+        st.markdown(f"##### 직종 상세: {name_of[dj]}의 5년 추이"
+                    + ("" if sel != ALL_JOBS else "  \n<small>사이드바에서 직종을 고르면 바뀝니다. 기본값은 위에서 기여가 가장 큰 직종.</small>"),
+                    unsafe_allow_html=True)
+        y0_detail = st.toggle("y축을 0%부터 표시", value=False, key="y0_detail")   # 위 추이 차트 토글과 별개
+        fig = make_subplots(rows=1, cols=2, subplot_titles=("<b>수료율</b>", "<b>취업률</b>"),
+                            horizontal_spacing=0.08, shared_yaxes=y0_detail)
+        jd = rates[(rates.job_key == dj) & rates.year.between(y0, y1)]
+        shown_legend = set()
+        for ci, mt in enumerate(["completion_rate", "employment_rate"], start=1):
+            vals = []
+            for c in COURSES:
+                for cd, dash, sym in (("2018", "dash", "circle-open"), ("2025", "solid", "circle")):
+                    s = jd[(jd.course == c) & (jd.code == cd)].set_index("year")[mt].dropna().sort_index() * 100
+                    if s.empty:
+                        continue
+                    vals += list(s.values / 100)
+                    key = f"{SHORT[c]} · {cd} 코드"
+                    fig.add_scatter(x=s.index, y=s.values, mode="lines+markers", name=key, legendgroup=key,
+                                    showlegend=key not in shown_legend,
+                                    line=dict(color=COLOR[c], width=2.5, dash=dash),
+                                    marker=dict(size=9, symbol=sym, color=COLOR[c], line=dict(width=2)),
+                                    hovertemplate=f"{key} %{{x}}년: %{{y:.1f}}%<extra></extra>", row=1, col=ci)
+                    shown_legend.add(key)
+            if y0 < SWITCH <= y1:
+                fig.add_vline(x=SWITCH - 0.5, line=dict(color=GREY, width=1, dash="dot"), row=1, col=ci)
+                fig.add_annotation(x=SWITCH - 0.5, y=0, yref=f"y{'' if ci == 1 else ci} domain", text="KECO 개편",
+                                   showarrow=False, xanchor="right", yanchor="bottom", font=dict(size=10, color=INK2),
+                                   row=1, col=ci)
+            if vals:
+                lo, hi = rate_range(vals, y0_detail)
+                fig.update_yaxes(range=[lo * 100, hi * 100], row=1, col=ci)
+            fig.update_yaxes(ticksuffix="%", row=1, col=ci)
+        fig.update_xaxes(tickmode="array", tickvals=years, range=[y0 - 0.4, y1 + 0.4])
+        fig.update_layout(height=380, font=PLOTLY_FONT, template="plotly_white",
+                          legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"), margin=dict(l=10, r=10, t=50, b=40))
+        st.plotly_chart(fig, config=PLOTLY_CONFIG)
+        st.caption("점선·속 빈 점 = 2018 직종코드, 실선·속 찬 점 = 2025 직종코드. 2025년 KECO 개편으로 직종의 세부 구성이 달라져 "
+                   "두 코드를 선으로 잇지 않았습니다. 2024년 취업률은 원자료에 두 코드 값이 함께 있고(수료율은 2025 코드만) "
+                   "같은 직종명도 값이 다릅니다. 표시되지 않는 점은 원자료 값이 없는 경우입니다.")
+
+    # -------------------------------------------------------------- ⑧ 출처·기준·한계
     with st.expander("데이터 출처 · 집계 기준 · 한계"):
         st.markdown("""
 **출처** 한국고용정보원 고용행정통계(eis.work24.go.kr, 원자료: 고용정보통합분석시스템 HRD-Net) — 실업자훈련
@@ -503,7 +578,7 @@ with tab_main:
 - 연령·성별 등 훈련생 특성은 데이터 제공처에서 함께 받을 수 없어(차원 4개 제한) 다루지 못했다.
 """)
 
-# ================================================================== 탭 2: 부록
+# ================================================================== 5. 탭 2 — 부록: 훈련 실시 현황
 with tab_app:
     st.markdown("분석과 별도로, 실업자훈련이 **언제·어디서 얼마나** 시작되는지 보여 주는 참고 자료입니다.")
     a1, a2 = st.columns(2)
@@ -561,32 +636,59 @@ with tab_app:
     if mp.empty or mp.values.sum() == 0:
         st.warning(f"표시할 데이터가 없습니다.  \n현재 조건: {cond_text(f'{y0}~{y1}')}  \n{why_empty(y0, y1)}")
     else:
-        fig, ax = plt.subplots(figsize=(12, 3.8))
-        ax.stackplot(mp.index, [mp[c] for c in ac], colors=[COLOR[c] for c in ac],
-                     labels=[SHORT[c] for c in ac], alpha=0.85, edgecolor="white", lw=1)
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
-        ax.xaxis.set_major_locator(mdates.YearLocator())
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-        ax.set_ylabel("명 (연인원)")
-        ax.set_xlim(mp.index.min(), mp.index.max())
-        ax.legend(loc="upper right", ncol=2)
-        fig.tight_layout()
-        show(fig)
-
+        # 한 플롯에 과정별 선을 겹친다. 범례를 누르면 선이 숨겨지고 y축이 남은 선에 맞춰 다시 잡힌다.
+        show_roll = st.checkbox("12개월 이동평균 함께 보기 (계절 변동을 걷어낸 추세)", value=False)
+        m_all = monthly[monthly.course.isin(ac)]                 # 이동평균은 범위 앞 달까지 필요해 전 기간으로 계산
+        if sido != "전국":
+            m_all = m_all[m_all.sido == sido]
+        if sel != ALL_JOBS:
+            m_all = m_all[m_all.job_key == sel]
+        full_m = (m_all.pivot_table(index="date", columns="course", values="trainees", aggfunc="sum")
+                  .reindex(columns=ac).fillna(0))
+        roll = full_m.rolling(12, min_periods=12).mean()
+        in_rng = (full_m.index.year >= y0) & (full_m.index.year <= y1)
+        fig = go.Figure()
+        for c in ac:
+            fig.add_scatter(x=full_m.index[in_rng], y=full_m[c][in_rng], mode="lines+markers", name=SHORT[c],
+                            legendgroup=c,                      # 같은 과정의 월별·평균 선을 범례 한 번 클릭으로 함께 숨김
+                            line=dict(color=COLOR[c], width=2), marker=dict(size=4),
+                            opacity=0.45 if show_roll else 1.0,
+                            hovertemplate=f"{SHORT[c]} %{{x|%Y년 %m월}}: %{{y:,.0f}}명<extra></extra>")
+            if show_roll:
+                fig.add_scatter(x=roll.index[in_rng], y=roll[c][in_rng], mode="lines",
+                                name=f"{SHORT[c]} 12개월 평균", line=dict(color=COLOR[c], width=4), legendgroup=c,
+                                hovertemplate=f"{SHORT[c]} 12개월 평균 %{{x|%Y년 %m월}}: %{{y:,.0f}}명<extra></extra>")
+        fig.update_layout(height=420, font=PLOTLY_FONT, template="plotly_white", hovermode="x unified",
+                          legend=dict(orientation="h", y=1.02, yanchor="bottom", x=0),
+                          yaxis=dict(tickformat=",", ticksuffix="명", rangemode="tozero"),
+                          margin=dict(l=10, r=10, t=40, b=30))
+        st.plotly_chart(fig, config=PLOTLY_CONFIG)
+        summary = []
+        for c in ac:
+            yt = full_m[c][full_m.index.year == y1].sum()
+            yp = full_m[c][full_m.index.year == y1 - 1].sum()
+            summary.append(f"{SHORT[c]} {y1}년 {yt:,.0f}명" + (f"(전년 대비 {(yt / yp - 1) * 100:+.1f}%)" if yp > 0 else ""))
+        st.markdown(" · ".join(summary))
+        st.caption("범례의 과정 이름을 누르면 그 선을 숨길 수 있고, y축은 남은 선에 맞춰 다시 잡힙니다. 두 과정은 규모 차이가 커서 "
+                   "(계좌제 월 4만 명대, 국기훈련 월 5천 명대) 함께 볼 때는 국기훈련 선이 낮게 깔리니, 국기훈련의 증감은 계좌제를 "
+                   "숨기고 보세요." + (" 굵은 선 = 직전 12개월 평균(2021년 12월부터 표시)." if show_roll else ""))
         b1, b2 = st.columns([3, 2])
         hm = m_sel.pivot_table(index="year", columns="month", values="trainees", aggfunc="sum").fillna(0)
         with b1:
             big = hm.values.max() >= 10000
-            fig, ax = plt.subplots(figsize=(7.5, 0.6 * len(hm) + 1.2))
-            sns.heatmap(hm / 1000 if big else hm, annot=True, fmt=".1f" if big else ".0f", cmap="Blues",
-                        cbar=False, linewidths=2, linecolor="white", annot_kws={"fontsize": 8.5}, ax=ax)
-            ax.set_xlabel("월")
-            ax.set_ylabel("")
-            ax.set_xticklabels([f"{m}월" for m in hm.columns], rotation=0)
-            ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
-            ax.set_title(f"연도 × 월 훈련 시작 인원 ({'천 명' if big else '명'})", loc="left")
-            fig.tight_layout()
-            show(fig)
+            z = hm / 1000 if big else hm
+            fig = go.Figure(go.Heatmap(
+                z=z.values, x=[f"{m}월" for m in hm.columns], y=[str(y) for y in hm.index],
+                colorscale="Blues", showscale=False, xgap=2, ygap=2,
+                text=z.values, texttemplate="%{text:.1f}" if big else "%{text:,.0f}",
+                customdata=hm.values,
+                hovertemplate="%{y}년 %{x}: %{customdata:,.0f}명<extra></extra>"))
+            fig.update_layout(height=46 * len(hm) + 110, font=PLOTLY_FONT, template="plotly_white",
+                              title=dict(text=f"연도 × 월 훈련 시작 인원 ({'천 명' if big else '명'})", x=0,
+                                         font=dict(size=14)),
+                              margin=dict(l=10, r=10, t=50, b=30), yaxis=dict(autorange="reversed"),
+                              xaxis=dict(tickangle=0))
+            st.plotly_chart(fig, config=PLOTLY_CONFIG)
         with b2:
             mavg = hm.mean()
             st.markdown(f"**계절 패턴** ({y0}~{y1}년 평균)")
@@ -611,23 +713,22 @@ with tab_app:
                    f"{why_empty(y1, y1, with_sido=False)}")
     else:
         sd = sd.loc[sd.sum(axis=1).sort_values().index]
-        fig, ax = plt.subplots(figsize=(12, max(0.32 * len(sd) + 1.2, 2.5)))
-        left = np.zeros(len(sd))
+        fig = go.Figure()
         for c in ac:
-            bars = ax.barh(sd.index, sd[c], left=left, color=COLOR[c], height=0.7, label=SHORT[c],
-                           edgecolor="white", linewidth=1)
-            for b, s in zip(bars, sd.index):
-                b.set_alpha(1.0 if (sido == "전국" or s == sido) else 0.3)
-            left += sd[c].values
-        for i, (s, val) in enumerate(zip(sd.index, left)):
-            ax.annotate(f"{val:,.0f}", (val, i), xytext=(4, 0), textcoords="offset points", va="center",
-                        fontsize=8.5, color=INK if (sido == "전국" or s == sido) else GREY)
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
-        ax.set_xlabel("명 (연인원)")
-        ax.grid(axis="y", visible=False)
-        ax.legend(loc="lower right")
-        fig.tight_layout()
-        show(fig)
+            fig.add_bar(y=sd.index, x=sd[c], orientation="h", name=SHORT[c], marker_color=COLOR[c],
+                        marker_opacity=[1.0 if (sido == "전국" or s == sido) else 0.3 for s in sd.index],
+                        marker_line=dict(color="white", width=1),
+                        hovertemplate=f"%{{y}} {SHORT[c]}: %{{x:,.0f}}명<extra></extra>")
+        tot = sd.sum(axis=1)
+        fig.add_scatter(y=sd.index, x=tot, mode="text", text=[f"{t:,.0f}" for t in tot], textposition="middle right",
+                        textfont=dict(size=11, color=[INK if (sido == "전국" or s == sido) else GREY for s in sd.index]),
+                        showlegend=False, hoverinfo="skip")
+        fig.update_layout(barmode="stack", height=max(26 * len(sd) + 100, 220), font=PLOTLY_FONT,
+                          template="plotly_white", legend=dict(orientation="h", y=1.02, yanchor="bottom", x=1,
+                                                               xanchor="right", traceorder="normal"),
+                          margin=dict(l=10, r=10, t=30, b=30),
+                          xaxis=dict(title="명 (연인원)", tickformat=",", range=[0, tot.max() * 1.15]))
+        st.plotly_chart(fig, config=PLOTLY_CONFIG)
         zero = sorted(set(monthly.sido.unique()) - set(sd.index))
         notes = []
         if zero:
