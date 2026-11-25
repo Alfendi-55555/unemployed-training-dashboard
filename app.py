@@ -217,16 +217,20 @@ with tab_main:
                 st.caption(f"**{name_of[sel]}**: 수료율 {pct(jc)}, 취업률 {pct(je)}"
                            + ("" if not (pd.isna(jc) and pd.isna(je)) else " (자료 없음)"))
     with kc[2], st.container(border=True):
-        st.markdown("<span style='font-weight:700'>격차 (국기훈련 - 계좌제)</span>", unsafe_allow_html=True)
+        # 부호 있는 '차이'로 표시하고, 증감 화살표 대신 기준 연도 값을 적는다.
+        # (차이가 음수일 때 ↓가 '격차가 줄었다'로 잘못 읽히는 것을 막기 위해 — 예: 수료율 −7.2 → −9.5%p는 벌어진 것)
+        st.markdown("<span style='font-weight:700'>차이 (국기훈련 − 계좌제)</span>", unsafe_allow_html=True)
         m1, m2 = st.columns(2)
         for mc, (lab, mt) in zip((m1, m2), [("수료율", "completion_rate"), ("취업률", "employment_rate")]):
             g = totals[mt][NAT] - totals[mt][ACC]
-            mc.metric(lab, f"{g[y1] * 100:+.1f}%p", pp(g[y1] - g[prev]) if prev else None, delta_color="off")
+            mc.metric(lab, f"{g[y1] * 100:+.1f}%p")
+            if prev:
+                mc.caption(f"{prev}년 {g[prev] * 100:+.1f}%p")
         if sel != ALL_JOBS:
             gc = job_rate(NAT, "completion_rate", y1) - job_rate(ACC, "completion_rate", y1)
             ge = job_rate(NAT, "employment_rate", y1) - job_rate(ACC, "employment_rate", y1)
             st.caption(f"**{name_of[sel]}**: 수료율 {pp(gc) or '–'}, 취업률 {pp(ge) or '–'}")
-    st.caption(f"▲▼ = {prev}년 대비 증감" if prev else "증감 표시 없음")
+    st.caption(f"▲▼ = {prev}년 대비 증감 · 차이 카드 아래 작은 글씨 = {prev}년 값" if prev else "증감 표시 없음")
 
     # -------------------------------------------------------------- ② 추이
     # 구역마다 같은 틀: 제목(질문) → 답 상자(사실 1~2개) → 위젯 → 차트 → 캡션 한 줄(읽는 법)
@@ -257,7 +261,7 @@ with tab_main:
         if len(years) > 1:
             a, n = totals[mt][ACC].loc[y0:y1] * 100, totals[mt][NAT].loc[y0:y1] * 100
             for x_, sh in ((y0, 40), (y1, -40)):
-                fig.add_annotation(x=x_, y=(a[x_] + n[x_]) / 2, text=f"격차 {n[x_] - a[x_]:+.1f}%p", showarrow=False,
+                fig.add_annotation(x=x_, y=(a[x_] + n[x_]) / 2, text=f"차이 {n[x_] - a[x_]:+.1f}%p", showarrow=False,
                                    xshift=sh, font=dict(size=11, color=INK2), row=1, col=ci)
         lo, hi = rate_range(totals[mt].loc[y0:y1].values.ravel(), y_from_zero)
         fig.update_yaxes(range=[lo * 100, hi * 100], ticksuffix="%", row=1, col=ci)
