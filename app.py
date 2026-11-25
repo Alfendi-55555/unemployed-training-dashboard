@@ -1,4 +1,4 @@
-"""실업자훈련 대시보드 — 국기훈련은 계좌제보다 '덜 수료하지만 더 취업시키는' 과정인가?
+"""실업자훈련 대시보드 — 국기훈련은 계좌제보다 '덜 수료하지만 더 취업하는' 과정인가?
 
 실행:  streamlit run app.py
 데이터: data/*.csv (prep_data.py 로 원본 xlsx 에서 생성)
@@ -160,7 +160,7 @@ period = f"{y0}~{y1}년" if y0 < y1 else f"{y1}년"          # 제목에 쓰는 
 trend_lbl = f"{period} 추이" if y0 < y1 else period          # 한 해만 고르면 '추이'를 빼고 연도만
 
 # ================================================================== 3. 머리말 (두 탭 공통)
-st.title("국기훈련은 '덜 수료하지만 더 취업시키는' 과정인가?")
+st.title("국기훈련은 '덜 수료하지만 더 취업하는' 과정인가?")
 # 한 줄 답 (맨 아래 결론 상자의 첫 줄과 같은 문장 — 두괄식)
 gN = totals["employment_rate"][NAT] - totals["employment_rate"][ACC]
 gC = totals["completion_rate"][NAT] - totals["completion_rate"][ACC]
@@ -303,7 +303,7 @@ with tab_main:
     with s1:
         metric_label = st.radio("비교 지표", list(METRICS), horizontal=True)
     metric = METRICS[metric_label]
-    title3.subheader("같은 직종이어도 더 취업시키나 — 직종별 비교" if metric_label == "취업률" else
+    title3.subheader("같은 직종이어도 더 취업하나 — 직종별 비교" if metric_label == "취업률" else
                      "같은 직종이어도 덜 수료하나 — 직종별 비교")
     with s2:
         min_n = st.slider("두 과정 모두 이 인원 이상인 직종만 (해당 연도 전국 훈련 시작 인원)", 0, 1000, 50, step=10)
