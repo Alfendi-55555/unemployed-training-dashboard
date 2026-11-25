@@ -146,8 +146,41 @@ def check_monthly(long: pd.DataFrame) -> None:
     print("  [OK] 월 인원: 직종→과정→시도→총계 합계 일치, 코드 기간 밖은 모두 0")
 
 
+def parse_keco_map(path: Path) -> pd.DataFrame:
+    """KECO 2025 신구연계표(두 번째 시트) → 2025 세분류 ↔ 2018 세분류 대응 행.
+
+    병합 셀은 값을 병합 범위 전체에 채운다(한 2018 코드가 여러 2025 코드로 나뉘는 등).
+    '삭제'(2025에 없음)·'신설'(2018에 없음)은 원문 그대로 둔다.
+    """
+    import openpyxl
+    ws = openpyxl.load_workbook(path).worksheets[1]
+    for rng in list(ws.merged_cells.ranges):
+        v = ws.cell(rng.min_row, rng.min_col).value
+        ws.unmerge_cells(rng.coord)
+        for r in range(rng.min_row, rng.max_row + 1):
+            for c in range(rng.min_col, rng.max_col + 1):
+                ws.cell(r, c).value = v
+    cols = ["major", "major_name", "mid", "mid_name", "minor", "minor_name",
+            "code_2025", "name_2025", "code_2018", "name_2018"]
+    rows = [[ws.cell(i, c).value for c in range(1, 11)] for i in range(4, ws.max_row + 1)]
+    d = pd.DataFrame(rows, columns=cols).astype("string").apply(lambda s: s.str.strip())
+    d = d[d.code_2025.notna() & ~d.code_2025.str.endswith("개", na=False)]      # 빈 줄·맨 끝 합계 줄 제거
+    d[["mid", "mid_name"]] = d[["mid", "mid_name"]].ffill()
+    d.loc[d.code_2025 == "삭제", "name_2025"] = pd.NA
+    d.loc[d.code_2018 == "신설", "name_2018"] = pd.NA
+    assert d.code_2025.str.fullmatch(r"\d{4}|삭제").all() and d.code_2018.str.fullmatch(r"\d{4}|신설").all()
+    assert d.mid.nunique() == 35, "중분류는 35개여야 함"
+    d["job_key"] = d.mid_name.map(job_key)
+    return d[["mid", "mid_name", "job_key", "code_2025", "name_2025", "code_2018", "name_2018"]]
+
+
 def main():
     OUT.mkdir(exist_ok=True)
+
+    # 직종코드 신구연계표 ---------------------------------------
+    keco = parse_keco_map(find_file("신구연계표"))
+    keco.to_csv(OUT / "keco_map.csv", index=False, encoding="utf-8-sig")
+    print(f"keco_map.csv: {len(keco)}행 (중분류 {keco.mid.nunique()}개)")
 
     # 연도 비율 ------------------------------------------------
     comp = parse_rates(find_file("수료율"), "completion_rate")
