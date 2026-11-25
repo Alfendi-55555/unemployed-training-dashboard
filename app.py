@@ -88,6 +88,11 @@ def rate_range(values, from_zero, min_span=0.10):
     return max(mid - span / 2, 0), min(mid + span / 2, 1.05)
 
 
+def trend_word(diff_pp):
+    """%p 차이 → '줄었다/늘었다'. 소수 첫째 자리로 같아 보이는 차이(0.05%p 미만)는 '거의 같았다'."""
+    return "거의 같았다" if abs(diff_pp) < 0.05 else ("줄었다" if diff_pp < 0 else "늘었다")
+
+
 def keco_note(detail="", label="직종코드 개편(2023→2024) 구간 포함"):
     """KECO 개편 안내: 화면에는 한 줄 표시만, 자세한 설명은 마우스를 올리면(ⓘ) 보인다."""
     st.caption(f":orange[**⚠ {label}**]", help=KECO_WARN + (" " + detail if detail else ""))
@@ -151,6 +156,8 @@ sel = st.sidebar.selectbox(
          "다만 세부 구성과 값은 달라 연도별 선은 개편 지점에서 잇지 않습니다.")
 st.sidebar.caption(f"기준 연도: **{y1}년** · 항목 옆 ⓘ에 마우스를 올리면 설명")
 years = list(range(y0, y1 + 1))
+period = f"{y0}~{y1}년" if y0 < y1 else f"{y1}년"          # 제목에 쓰는 기간 (사이드바 범위를 따름)
+trend_lbl = f"{period} 추이" if y0 < y1 else period          # 한 해만 고르면 '추이'를 빼고 연도만
 
 # ================================================================== 3. 머리말 (두 탭 공통)
 st.title("국기훈련은 '덜 수료하지만 더 취업시키는' 과정인가?")
@@ -162,7 +169,7 @@ answer = (f"**답: {'그렇다' if yes else '이 기간에는 그렇지 않다'}
           f"수료율 {gC[y1] * 100:+.1f}%p, 취업률 {gN[y1] * 100:+.1f}%p.")
 if len(years) > 1:
     answer += (f" 다만 취업 우위는 **{gN[y0] * 100:.1f}%p({y0}) → {gN[y1] * 100:.1f}%p({y1})로 "
-               f"{'줄었다' if gN[y1] < gN[y0] else '늘었다'}**.")
+               f"{trend_word(gN[y1] * 100 - gN[y0] * 100)}**.")
 st.markdown(answer)
 
 h1, h2 = st.columns([4, 1], vertical_alignment="center")
@@ -224,14 +231,14 @@ with tab_main:
     # -------------------------------------------------------------- ② 추이
     # 구역마다 같은 틀: 제목(질문) → 답 상자(사실 1~2개) → 위젯 → 차트 → 캡션 한 줄(읽는 법)
     st.divider()
-    st.subheader("덜 수료하고 더 취업하나, 그 우위는 유지됐나 — 5년 추이")
+    st.subheader(f"덜 수료하고 더 취업하나 — {trend_lbl}")
     emp = totals["employment_rate"] * 100
     gapC = (totals["completion_rate"][NAT] - totals["completion_rate"][ACC]).loc[y0:y1] * 100
     gapE = (emp[NAT] - emp[ACC]).loc[y0:y1]
     if len(years) > 1:
         st.info(f"수료율은 매년 국기훈련이 {abs(gapC).min():.1f}~{abs(gapC).max():.1f}%p 낮다. "
                 f"취업률은 국기훈련이 높지만, 격차가 **{gapE[y0]:.1f}%p({y0}) → {gapE[y1]:.1f}%p({y1})로 "
-                f"{'줄었다' if gapE[y1] < gapE[y0] else '늘었다'}**.")
+                f"{trend_word(gapE[y1] - gapE[y0])}**.")
     else:
         st.info(f"{y1}년 국기훈련은 계좌제보다 수료율 {gapC[y1]:+.1f}%p, 취업률 {gapE[y1]:+.1f}%p.")
     y_from_zero = st.toggle("y축을 0%부터 표시", value=False)
@@ -258,8 +265,8 @@ with tab_main:
     fig.update_layout(height=420, font=PLOTLY_FONT, template="plotly_white", hovermode="x unified",
                       legend=dict(orientation="h", y=1.2, yanchor="bottom", x=0), margin=dict(l=10, r=10, t=80, b=30))
     st.plotly_chart(fig, config=PLOTLY_CONFIG)
-    st.caption("음영 = 두 과정의 차이"
-               + ("" if y_from_zero else " · y축이 0%에서 시작하지 않아 차이가 확대되어 보임(토글로 전환)"))
+    if not y_from_zero:
+        st.caption("y축이 0%에서 시작하지 않아 차이가 확대되어 보임(토글로 전환)")
 
     # 취업률 격차 분해: 격차 변화 = 국기훈련 변화 - 계좌제 변화 (해마다)
     stages = []                                  # (연도, 국기 변화, 계좌 변화, 격차 변화, 주된 원인) — 결론에서도 사용
@@ -272,7 +279,8 @@ with tab_main:
     if len(years) > 1:
         dN, dA = emp[NAT][y1] - emp[NAT][y0], emp[ACC][y1] - emp[ACC][y0]
         nat_main = abs(dN) >= abs(dA)
-        st.markdown("##### 취업률 격차는 언제, 무엇 때문에 줄었나")
+        verb = {"줄었다": "줄었나", "늘었다": "늘었나"}.get(trend_word(dN - dA), "변했나")   # 필터에 따라 방향이 바뀜
+        st.markdown(f"##### 격차는 언제, 왜 {verb} — 연도별 분해")
         big = [f"{y}년 격차 {g:+.1f}%p({who})" for y, sN, sA, g, who in stages if abs(g) >= 1]
         st.info(f"{y0}→{y1}년 격차 변화 {dN - dA:+.1f}%p = 국기훈련 {dN:+.1f}%p − 계좌제 {dA:+.1f}%p. "
                 f"해마다 보면 **{', '.join(big) if big else '1%p 넘게 움직인 해 없음'}**.")
@@ -282,10 +290,10 @@ with tab_main:
                   "격차 변화(%p)": round(g, 1), "주된 원인": who} for y, sN, sA, g, who in stages]),
                 hide_index=True, width="stretch")
         if nat_main:
-            st.caption("격차 변화 = 국기훈련 변화 − 계좌제 변화. 기간 전체로는 국기훈련의 변화가 더 커서, "
+            st.caption("기간 전체로는 국기훈련 쪽 변화가 더 커서, "
                        "다음 구역에서 국기훈련 취업률을 직종별로 쪼개 봅니다(계좌제는 직종이 30개 안팎으로 흩어져 있어 쪼개지 않음).")
         else:
-            st.warning("이 기간 격차 변화는 **주로 계좌제의 변화** 때문입니다. 아래 '직종별로 쪼개 보기'는 국기훈련 쪽만 본 것이라 "
+            st.warning("이 기간 격차 변화는 **주로 계좌제의 변화** 때문입니다. 아래 '직종별 분해'는 국기훈련 쪽만 본 것이라 "
                        "이 기간 격차 변화의 주된 원인을 설명하지 않습니다.")
 
     # -------------------------------------------------------------- ③ 같은 직종 비교
@@ -295,8 +303,8 @@ with tab_main:
     with s1:
         metric_label = st.radio("비교 지표", list(METRICS), horizontal=True)
     metric = METRICS[metric_label]
-    title3.subheader(f"같은 직종이어도 국기훈련이 더 취업시키나 — {y1}년 직종별 비교" if metric_label == "취업률" else
-                     f"같은 직종이어도 국기훈련의 수료율이 더 낮은가 — {y1}년 직종별 비교")
+    title3.subheader("같은 직종이어도 더 취업시키나 — 직종별 비교" if metric_label == "취업률" else
+                     "같은 직종이어도 덜 수료하나 — 직종별 비교")
     with s2:
         min_n = st.slider("두 과정 모두 이 인원 이상인 직종만 (해당 연도 전국 훈련 시작 인원)", 0, 1000, 50, step=10)
     code = code_of(y1)
@@ -346,7 +354,7 @@ with tab_main:
             note = (f" 인원 기준으로 제외된 {len(hidden)}개 직종까지 포함하면 {len(full)}개 중 {win_all}개"
                     + (f" (예외: {', '.join(short_job(j) for j in lows.index)})." if len(lows) else "."))
         sel_note = "" if sel == ALL_JOBS or any(hl) else f" 선택한 직종({name_of[sel]})은 이 조건에서 비교 대상이 아닙니다."
-        st.caption(f"점 두 개 = 같은 직종의 두 과정 값, 오른쪽 숫자 = 국기 − 계좌제. {y1}년·{code} 직종코드 기준."
+        st.caption(f"{y1}년·{code} 직종코드 기준."
                    f"{note}{sel_note}")
         with st.expander("표로 보기"):
             st.dataframe(pd.DataFrame({
@@ -359,7 +367,7 @@ with tab_main:
     # 격차 변화의 주된 원인인 '국기훈련 취업률'에 고정 (위 정보 상자의 격차 분해가 이유)
     dc, metric, metric_label = NAT, "employment_rate", "취업률"
     st.divider()
-    st.subheader("국기훈련 취업률은 왜 변했나 — 직종별로 쪼개 보기")
+    st.subheader("국기훈련 취업률은 왜 변했나 — 직종별 분해")
     # 같은 직종코드 안의 '연속 연도' 구간만 선택지로 (연도 범위 안)
     consec = [p for p in pairs_for(dc, metric) if p[1] - p[0] == 1 and y0 <= p[0] and p[1] <= y1]
     skipped = [f"{y}→{y + 1}" for y in range(y0, y1)
@@ -467,9 +475,8 @@ with tab_main:
         fig.update_xaxes(title="기여 (%p)", range=[lo - pad, hi + pad], zeroline=True, zerolinecolor=INK2, row=1, col=2)
         fig.update_yaxes(categoryorder="array", categoryarray=cats, autorange="reversed", title=None)
         st.plotly_chart(fig, config=PLOTLY_CONFIG)
-        st.caption(f"왼쪽: 직종별 두 해 비교(괄호 = {pa}년 인원 비중) · 오른쪽: 전체 변화에 대한 기여 추정(인원 비중 × 변화), "
-                   "위에서부터 큰 순 · 맨 아래 빗금 = 직종으로 나눌 수 없는 부분(오른쪽 막대를 모두 더하면 실제 변화) · "
-                   "마우스를 올리면 정확한 값")
+        st.caption(f"괄호 = {pa}년 인원 비중 · 기여 = 인원 비중 × 변화(추정) · "
+                   "빗금 = 직종으로 나눌 수 없는 부분, 오른쪽 막대를 모두 더하면 실제 변화")
         with st.expander("표로 보기 (정확한 값)"):
             split = (f"직종 구성 변화 {between * 100:+.2f}%p + 근사 오차 {(resid - between) * 100:+.2f}%p"
                      if pd.notna(between) else f"구성 변화 + 근사 오차 {resid * 100:+.2f}%p({pb}년 시작 인원이 이 코드로 없어 나눌 수 없음)")
@@ -490,8 +497,8 @@ with tab_main:
     order = comp.sum().sort_values(ascending=False).index
     focus = sel if (sel != ALL_JOBS and sel in comp.columns) else order[0]
     st.divider()
-    st.subheader("그 쏠림은 계속되나 — 국기훈련 훈련 시작 인원의 직종 구성" if focus == order[0] else
-                 f"{name_of[focus]}의 비중은 어떻게 변했나 — 국기훈련 훈련 시작 인원의 직종 구성")
+    st.subheader("그 쏠림은 계속되나 — 국기훈련 직종 구성" if focus == order[0] else
+                 f"{name_of[focus]} 비중은 어떻게 변했나 — 국기훈련 직종 구성")
     # 답: 직종코드 체계별로 나눠서 (개편 앞뒤 값은 직접 비교하지 않음)
     eras = []
     for era, ys in (("2018 코드", [y for y in share.index if y < SWITCH]), ("2025 코드", [y for y in share.index if y >= SWITCH])):
@@ -531,7 +538,7 @@ with tab_main:
                       xaxis=dict(range=[0, 100], ticksuffix="%", title=None),
                       yaxis=dict(categoryorder="array", categoryarray=rows, autorange="reversed", title=None))
     st.plotly_chart(fig, config=PLOTLY_CONFIG)
-    st.caption("막대 = 그 해 국기훈련 시작 인원(연인원) 중 직종별 비율, 인원 상위 4개 외는 '기타' · 마우스를 올리면 인원")
+    st.caption("그 해 국기훈련 시작 인원(연인원) 기준 · 인원 상위 4개 외는 '기타'")
 
     # -------------------------------------------------------------- ⑥ 결론 + 한계 요약
     st.divider()
@@ -565,10 +572,12 @@ with tab_main:
                 "자세한 출처·기준·한계는 맨 아래 상자에 있습니다.")
 
     # -------------------------------------------------------------- ⑦ 직종 하나 자세히 보기 (접이식)
-    with st.expander("직종 하나 자세히 보기 — 5년 추이와 직종코드 개편"):
-        dj = sel if sel != ALL_JOBS else (key_of.get(top) if top else "정보통신연구개발직및공학기술직")
-        st.markdown(f"##### 직종 상세: {name_of[dj]}의 5년 추이"
-                    + ("" if sel != ALL_JOBS else "  \n<small>사이드바에서 직종을 고르면 바뀝니다. 기본값은 위에서 기여가 가장 큰 직종.</small>"),
+    with st.expander("직종 하나 자세히 보기 — 추이와 코드 개편"):
+        # 기본 직종: 쪼개 보기에서 기여가 가장 큰 직종, 비교 구간이 없으면 직종 구성에서 인원이 가장 많은 직종
+        dj = sel if sel != ALL_JOBS else (key_of.get(top) if top else order[0])
+        why = "위에서 기여가 가장 큰 직종" if top else "위 직종 구성에서 인원이 가장 많은 직종"
+        st.markdown(f"##### 직종 상세: {name_of[dj]} — {trend_lbl}"
+                    + ("" if sel != ALL_JOBS else f"  \n<small>사이드바에서 직종을 고르면 바뀝니다. 기본값은 {why}.</small>"),
                     unsafe_allow_html=True)
         if y0 < SWITCH <= y1:
             keco_note("아래 차트에서 점선(2018 코드)과 실선(2025 코드)을 잇지 않은 이유입니다.")
@@ -605,9 +614,8 @@ with tab_main:
         fig.update_layout(height=380, font=PLOTLY_FONT, template="plotly_white",
                           legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"), margin=dict(l=10, r=10, t=50, b=40))
         st.plotly_chart(fig, config=PLOTLY_CONFIG)
-        st.caption("점선·속 빈 점 = 2018 직종코드, 실선·속 찬 점 = 2025 직종코드. 2025년 KECO 개편으로 직종의 세부 구성이 달라져 "
-                   "두 코드를 선으로 잇지 않았습니다. 2024년 취업률은 원자료에 두 코드 값이 함께 있고(수료율은 2025 코드만) "
-                   "같은 직종명도 값이 다릅니다. 표시되지 않는 점은 원자료 값이 없는 경우입니다.")
+        st.caption("2024년 취업률은 원자료에 두 코드 값이 함께 있고(수료율은 2025 코드만) 서로 다릅니다. "
+                   "빠진 점은 원자료 값이 없는 경우입니다.")
 
     # -------------------------------------------------------------- ⑧ 출처·기준·한계
     with st.expander("데이터 출처 · 집계 기준 · 한계"):
@@ -636,9 +644,12 @@ with tab_main:
 - 2025년 KECO(한국고용직업분류) 개편으로 직종 단위 계열은 2023/2024 사이에서 끊긴다. 2024년 취업률은 두 코드 값이 함께
   제공되는데, 중분류 체계가 거의 같은데도 값이 다르다(예: 국기훈련 정보통신 연구개발직 56.9% vs 52.6%). 과정·훈련생을
   직종에 배정하는 방식이 바뀌었을 수 있으나 제공처가 밝히지 않아 확인하지 못했고, 그래서 잇지 않았다.
-- 비율 값이 0인 칸은 '자료 없음'과 '실제 0%'를 구분할 수 없어 모두 결측으로 처리했다.
+- 원자료 비율의 0은 결측으로 처리했다. 대부분(수료율 247칸, 취업률 194칸)은 그 직종코드가 쓰이지 않은 기간이라
+  '자료 없음'이 확실하다. 코드 사용 기간 안의 0(수료율 8칸, 취업률 7칸)은 모두 인원이 매우 적은 직종이라 '실제 0%'와
+  구분할 수 없다. 이 중 국기훈련 농림어업직 2024년 취업률은 수료율(96.4%)이 있어 실제 0%일 수도 있지만, 인원 비중이
+  0.03%라 결과에 주는 영향은 무시할 수준이다.
 - 인원이 적은 직종은 비율이 크게 흔들린다 → 같은 직종 비교에 최소 인원 필터.
-- 직종별 기여(직종별로 쪼개 보기)는 비율의 실제 가중치인 직종별 수료인원이 공개되지 않아, 시작 연도의 **훈련 시작 인원
+- 직종별 기여('왜 변했나 — 직종별 분해' 구역)는 비율의 실제 가중치인 직종별 수료인원이 공개되지 않아, 시작 연도의 **훈련 시작 인원
   비중**으로 대신했다. 비율은 그 해 **끝난** 과정, 인원은 그 해 **시작한** 과정 기준(연인원)이라 대상 집단이 달라, 기여의 합이
   실제 변화와 정확히 맞지 않는다. 맞지 않는 부분은 '직종 구성 변화'와 '근사 오차' 막대로 따로 표시했다.
   가중치 기준을 바꾸면 기여 크기도 달라진다(예: 2022→2023년을 전년도 시작 인원 × 수료율로 계산하면 직종별 기여 합이
@@ -747,9 +758,8 @@ with tab_app:
             yp = full_m[c][full_m.index.year == y1 - 1].sum()
             summary.append(f"{SHORT[c]} {y1}년 {yt:,.0f}명" + (f"(전년 대비 {(yt / yp - 1) * 100:+.1f}%)" if yp > 0 else ""))
         st.markdown(" · ".join(summary))
-        st.caption("범례의 과정 이름을 누르면 그 선을 숨길 수 있고, y축은 남은 선에 맞춰 다시 잡힙니다. 두 과정은 규모 차이가 커서 "
-                   "(계좌제 월 4만 명대, 국기훈련 월 5천 명대) 함께 볼 때는 국기훈련 선이 낮게 깔리니, 국기훈련의 증감은 계좌제를 "
-                   "숨기고 보세요." + (" 굵은 선 = 직전 12개월 평균(2021년 12월부터 표시)." if show_roll else ""))
+        st.caption("범례에서 계좌제를 눌러 숨기면 국기훈련 증감이 잘 보입니다(규모가 월 4만 명대 vs 5천 명대)."
+                   + (" 굵은 선 = 직전 12개월 평균(2021년 12월부터 표시)." if show_roll else ""))
         b1, b2 = st.columns([3, 2])
         hm = m_sel.pivot_table(index="year", columns="month", values="trainees", aggfunc="sum").fillna(0)
         with b1:
