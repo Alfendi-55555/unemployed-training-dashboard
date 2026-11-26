@@ -88,6 +88,11 @@ def rate_range(values, from_zero, min_span=0.10):
     return max(mid - span / 2, 0), min(mid + span / 2, 1.05)
 
 
+def share_txt(p):
+    """비중(%) 표시: 소수 첫째 자리, 0.1% 미만은 '<0.1%' (반올림한 0%가 '값 없음'으로 읽히지 않게)."""
+    return "<0.1%" if 0 < p < 0.05 else f"{p:.1f}%"
+
+
 def trend_word(diff_pp):
     """%p 차이 → '줄었다/늘었다'. 소수 첫째 자리로 같아 보이는 차이(0.05%p 미만)는 '거의 같았다'."""
     return "거의 같았다" if abs(diff_pp) < 0.05 else ("줄었다" if diff_pp < 0 else "늘었다")
@@ -507,11 +512,11 @@ with tab_main:
     eras = []
     for era, ys in (("2018 코드", [y for y in share.index if y < SWITCH]), ("2025 코드", [y for y in share.index if y >= SWITCH])):
         if ys:
-            eras.append(f"{era} {share.loc[ys[0], focus] * 100:.0f}%({ys[0]})"
-                        + (f" → {share.loc[ys[-1], focus] * 100:.0f}%({ys[-1]})" if len(ys) > 1 else ""))
+            eras.append(f"{era} {share_txt(share.loc[ys[0], focus] * 100)}({ys[0]})"
+                        + (f" → {share_txt(share.loc[ys[-1], focus] * 100)}({ys[-1]})" if len(ys) > 1 else ""))
     low = share[focus].min() * 100
     st.info(f"국기훈련 시작 인원 중 **{name_of[focus]}** 비중: {' / '.join(eras)}."
-            + (f" 모든 해에 **{low:.0f}% 이상**을 차지한다." if focus == order[0] and len(share) > 1 else ""))
+            + (f" 모든 해에 **{share_txt(low)} 이상**을 차지한다." if focus == order[0] and len(share) > 1 else ""))
     if y0 < SWITCH <= y1:
         keco_note("그래서 비중도 각 코드 체계 안에서만 비교했습니다.")
     others = [j for j in order if j != focus][:4]
@@ -530,7 +535,8 @@ with tab_main:
         dark = colr in (COLOR[dc], OTHER_GREYS[0], OTHER_GREYS[1])
         fig.add_bar(y=[str(y) for y in plot.index], x=vals, orientation="h", name=label, marker_color=colr,
                     marker_line=dict(color="white", width=2),
-                    text=[f"<b>{x_:.0f}%</b>" if col == focus else f"{x_:.0f}%" if x_ >= 6 else "" for x_ in vals],
+                    # 고른 직종만 소수 첫째 자리(칸이 좁은 나머지는 정수, 정확한 값은 툴팁)
+                    text=[f"<b>{share_txt(x_).replace('<', '&lt;')}</b>" if col == focus else f"{x_:.0f}%" if x_ >= 6 else "" for x_ in vals],
                     textposition="inside", insidetextanchor="middle", textangle=0,
                     textfont=dict(color="white" if dark else INK, size=12),
                     customdata=[[f"{n_:,.0f}"] for n_ in cnt.reindex(plot.index)],
