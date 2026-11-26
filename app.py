@@ -153,9 +153,13 @@ y0, y1 = st.sidebar.select_slider("연도 범위", options=list(range(2021, 2026
                                   help="요약 카드와 같은 직종 비교의 기준 연도는 범위의 끝 연도입니다.")
 job_keys = sorted(rates[(rates.level == "직종")].dropna(subset=["employment_rate"]).job_key.unique(),
                   key=lambda k: name_of[k])
+# 국기훈련은 지정 직종만 있어서, 계좌제에만 있는 직종은 국기훈련 구역(직종별 분해·직종 구성)에 나오지 않는다
+nat_keys = set(rates[(rates.level == "직종") & (rates.course == NAT)].dropna(subset=["employment_rate"]).job_key)
 sel = st.sidebar.selectbox(
-    "직종 (하나 선택)", [ALL_JOBS] + job_keys, format_func=lambda k: k if k == ALL_JOBS else name_of[k],
+    "직종 (하나 선택)", [ALL_JOBS] + job_keys,
+    format_func=lambda k: k if k == ALL_JOBS else name_of[k] + ("" if k in nat_keys else " · 계좌제만"),
     help="고르면 요약 카드에 그 직종 값이 추가되고, 직종별 차트에서 그 직종이 강조됩니다. "
+         "'계좌제만' 표시 직종은 국기훈련 지정 직종이 아니라 국기훈련 구역(직종별 분해·직종 구성)에는 나오지 않습니다.\n\n"
          "수료율·취업률은 직종별 인원이 공개되지 않아 여러 직종을 합쳐 계산할 수 없으므로 한 번에 하나만 고릅니다.\n\n"
          "2018·2025 직종코드의 같은 중분류를 하나로 묶어 표시합니다(신구연계표 기준 중분류 체계 동일). "
          "다만 세부 구성과 값은 달라 연도별 선은 개편 지점에서 잇지 않습니다.")
@@ -417,6 +421,10 @@ with tab_main:
                       label=f"{pb}년 값은 2018 직종코드 기준 (다른 구역의 {pb}년 값과 다름)")
 
         hl = [key_of.get(j) == sel for j in v.index]
+        if sel != ALL_JOBS and not any(hl):      # 고른 직종이 이 분해에 없을 때 조용히 넘어가지 않도록
+            st.caption(f"선택한 직종({name_of[sel]})은 "
+                       + ("국기훈련 지정 직종이 아니라 이 구역에는 나오지 않습니다." if sel not in nat_keys
+                          else f"{pa}→{pb}년 두 해의 값이 모두 있지 않아 이 구간에는 나오지 않습니다."))
         names = [(f"<b>{short_job(j)}</b>" if h else short_job(j)) + (f" ({w * 100:.0f}%)" if w >= 0.005 else " (<1%)")
                  for j, h, w in zip(v.index, hl, v.w)]
         wtxt = [f"{w * 100:.1f}%" if w >= 0.0005 else "<0.1%" for w in v.w]
@@ -505,6 +513,7 @@ with tab_main:
     share = comp.div(comp.sum(axis=1), axis=0)
     order = comp.sum().sort_values(ascending=False).index
     focus = sel if (sel != ALL_JOBS and sel in comp.columns) else order[0]
+    missing_sel = sel != ALL_JOBS and focus != sel  # 고른 직종이 국기훈련 인원에 없으면 1위 직종으로 대신 보여 줌
     st.divider()
     st.subheader("그 쏠림은 계속되나 — 국기훈련 직종 구성" if focus == order[0] else
                  f"{name_of[focus]} 비중은 어떻게 변했나 — 국기훈련 직종 구성")
@@ -517,6 +526,10 @@ with tab_main:
     low = share[focus].min() * 100
     st.info(f"국기훈련 시작 인원 중 **{name_of[focus]}** 비중: {' / '.join(eras)}."
             + (f" 모든 해에 **{share_txt(low)} 이상**을 차지한다." if focus == order[0] and len(share) > 1 else ""))
+    if missing_sel:
+        st.caption(f"선택한 직종({name_of[sel]})은 "
+                   + ("국기훈련 지정 직종이 아니라" if sel not in nat_keys else "이 기간 국기훈련 시작 인원이 없어")
+                   + f" 이 구역에는 나오지 않습니다. 대신 인원이 가장 많은 직종을 보여 줍니다.")
     if y0 < SWITCH <= y1:
         keco_note("그래서 비중도 각 코드 체계 안에서만 비교했습니다.")
     others = [j for j in order if j != focus][:4]
